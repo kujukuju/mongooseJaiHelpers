@@ -10,29 +10,23 @@ mg_threaded_server :: struct {
     using endpoint_server: mg_endpoint_server;
     threads: [] Thread;
     semaphores: [] Semaphore;
-    states: [] mg_thread_state;
+    thread_states: [] mg_thread_state;
     connections: [] *mg_connection_data;
     threads_alive: [] bool;
 }
 
-mg_thread_state :: enum u8 { Available :: 0; Processing; SettingReplyNoFree; ShouldReply; Replied; ClosedNotFreed; ClosedShouldFreeNoConnection; ClosedFreeing; };
-
-// Available -> Processing
-// Processing -> SettingReplyNoFree | ClosedFreeing
-// SettingReplyNoFree -> ShouldReply | ClosedNotFreed
-// ShouldReply -> ClosedFreeing | Replied
-// Replied -> ClosedFreeing
-// ClosedNotFreed -> ClosedShouldFreeNoConnection
-// ClosedShouldFreeNoConnection -> Available
-// ClosedFreeing -> Available
+mg_thread_state :: enum u8 { Available :: 0; Processing; };
 
 mg_connection_data :: struct {
+    connection_state: mg_connection_state;
     thread_index: int;
     callback: mg_endpoint_callback_data;
     request: mg_request;
     response: mg_response;
     reply: mg_result;
 }
+
+mg_connection_state :: enum u8 { Opened :: 0; ShouldReply; Replying; Replied; ClosedNotFreed; ClosedAndFreed; };
 
 mg_threaded_server_create :: (data: *void = null) -> *mg_threaded_server {
     server := New(mg_threaded_server);
@@ -43,10 +37,13 @@ mg_threaded_server_create :: (data: *void = null) -> *mg_threaded_server {
     thread_count := get_number_of_processors();
     server.threads = NewArray(thread_count, Thread);
     server.semaphores = NewArray(thread_count, Semaphore);
-    server.states = NewArray(thread_count, mg_thread_state);
+    server.thread_states = NewArray(thread_count, mg_thread_state);
     server.connections = NewArray(thread_count, *mg_connection_data);
     server.threads_alive = NewArray(thread_count, bool);
     server.alive = true;
+
+    mg_set_log_level(cast(s32) MG_LL.NONE);
+    // mg_log_level = cast(s32) MG_LL.ERROR;
 
     thread_callback :: (thread: *Thread) -> s64 {
         server := cast(*mg_threaded_server) thread.data;
@@ -68,23 +65,19 @@ mg_threaded_server_create :: (data: *void = null) -> *mg_threaded_server {
                 return 0;
             }
 
-            if compare_and_swap(*server.states[index], .Processing, .SettingReplyNoFree) {
-                // setting reply is telling the server that this isn't allowed to be freed
-                connection_data := server.connections[index];
-                connection_data.reply = connection_data.callback(*connection_data.request, *connection_data.response, server.endpoint_server.data);
+            connection_data := server.connections[index];
+            connection_data.reply = connection_data.callback(*connection_data.request, *connection_data.response, server.endpoint_server.data);
 
-                while true {
-                    should_reply := compare_and_swap(*server.states[index], .SettingReplyNoFree, .ShouldReply);
-                    should_free := compare_and_swap(*server.states[index], .ClosedNotFreed, .ClosedShouldFreeNoConnection);
-
-                    if should_reply {
-                        break;
-                    } else if should_free {
-                        maybe_make_thread_available(server, connection_data);
-                        break;
-                    }
+            if !compare_and_swap(*connection_data.connection_state, .Opened, .ShouldReply) {
+                // if we couldn't set the state to should reply, that means we're closed not freed
+                did_free := maybe_free_connection_data(connection_data);
+                if did_free {
+                    free(connection_data);
                 }
             }
+
+            server.connections[index] = null;
+            server.thread_states[index] = .Available;
         }
 
         return 0;
@@ -95,50 +88,50 @@ mg_threaded_server_create :: (data: *void = null) -> *mg_threaded_server {
 
         thread_init(*server.threads[i], thread_callback);
         init(*server.semaphores[i]);
-        server.states[i] = .Available;
+        server.thread_states[i] = .Available;
         server.threads_alive[i] = true;
     }
 
     return server;
 }
 
-maybe_make_thread_available :: (server: *mg_threaded_server, connection_data: *mg_connection_data) {
+// this only gets called on close
+// or when the thread fails to write because its marked as closed
+maybe_free_connection_data :: (connection_data: *mg_connection_data) -> did_free: bool {
     start := seconds_since_init();
 
-    index := connection_data.index;
-
     while true {
-        print("Trying to close.\n");
-        should_free := compare_and_swap(*server.states[index], .Processing, .ClosedFreeing);
-        should_free = should_free || compare_and_swap(*server.states[index], .ShouldReply, .ClosedFreeing);
-        should_free = should_free || compare_and_swap(*server.states[index], .Replied, .ClosedFreeing);
-        should_free_without_connection := compare_and_swap(*server.states[index], .ClosedShouldFreeNoConnection, .ClosedFreeing);
-        should_close := compare_and_swap(*server.states[index], .SettingReplyNoFree, .ClosedNotFreedNoConnection);
+        should_close := compare_and_swap(*connection_data.connection_state, .Opened, .ClosedNotFreed);
 
-        if should_free || should_free_without_connection {
+        if should_close {
+            return false;
+        } else {
+            should_free := compare_and_swap(*connection_data.connection_state, .ShouldReply, .ClosedAndFreed);
+            should_free = should_free || compare_and_swap(*connection_data.connection_state, .Replying, .ClosedAndFreed);
+            should_free = should_free || compare_and_swap(*connection_data.connection_state, .Replied, .ClosedAndFreed);
+            should_free = should_free || compare_and_swap(*connection_data.connection_state, .ClosedNotFreed, .ClosedAndFreed);
+
             if should_free {
-                (cast(**mg_connection_data) conn.data.data).* = null;
+                mg_free(connection_data);
+
+                return true;
             }
-
-            print("Swapped to available.\n");
-
-            mg_free(connection_data);
-            free(connection_data);
-
-            server.states[index] = .Available;
-
-            break;
-        } else if should_free_without_connection {
-        } else if should_close {
-            print("Swapped to closed.\n");
-
-            break;
         }
 
         if seconds_since_init() - start > 2 {
             print("This is really bad. It's never closing.\n");
         }
     }
+
+    return false;
+}
+
+get_connection_data :: (conn: *mg_connection) -> *mg_connection_data {
+    return (cast(**mg_connection_data) conn.data.data).*;
+}
+
+set_connection_data :: (conn: *mg_connection, data: *mg_connection_data) {
+    (cast(**mg_connection_data) conn.data.data).* = data;
 }
 
 mg_threaded_server_listen :: (server: *mg_threaded_server, port: u16) {
@@ -149,12 +142,9 @@ mg_threaded_server_listen :: (server: *mg_threaded_server, port: u16) {
     process_message :: (cb: mg_endpoint_callback_data, conn: *mg_connection, request: *mg_request, response: *mg_response, data: *void, listen_data: *void) {
         server := cast(*mg_threaded_server) listen_data;
 
-        // print("accepted? %\n", get_connection_listening(conn, .is_accepted));
-        // set_connection_state(conn, .is_accepted, true);
-
         thread_index := 0;
         while true {
-            valid_thread := compare_and_swap(*server.states[thread_index], .Available, .Processing);
+            valid_thread := compare_and_swap(*server.thread_states[thread_index], .Available, .Processing);
             if valid_thread {
                 break;
             }
@@ -165,7 +155,17 @@ mg_threaded_server_listen :: (server: *mg_threaded_server, port: u16) {
             }
         }
 
-        connection_data := New(mg_connection_data);
+        // set_connection_state(conn, .is_hexdumping, false);
+
+        connection_data := get_connection_data(conn);
+        if !connection_data {
+            connection_data = New(mg_connection_data);
+            set_connection_data(conn, connection_data);
+        }
+
+        connection_data.* = .{};
+
+        connection_data.connection_state = .Opened;
         connection_data.thread_index = thread_index;
         connection_data.callback = cb;
         connection_data.request = mg_copy_request(request.*);
@@ -174,40 +174,51 @@ mg_threaded_server_listen :: (server: *mg_threaded_server, port: u16) {
         // we're found an available thread so we can safely set it to processing
         server.connections[thread_index] = connection_data;
 
-        (cast(**mg_connection_data) conn.data.data).* = connection_data;
-
         signal(*server.semaphores[thread_index]);
     }
 
     process_poll :: (conn: *mg_connection, listen_data: *void) {
         server := cast(*mg_threaded_server) listen_data;
 
-        // conneciton data is now always valid until the close event
-        connection_data := (cast(**mg_connection_data) conn.data.data).*;
-        if connection_data {
-            index := connection_data.thread_index;
+        // conneciton data is now always valid after the first message until the close event
+        if conn {
+            connection_data := get_connection_data(conn);
 
-            if compare_and_swap(*server.states[index], .ShouldReply, .Replied) {
+            if connection_data && compare_and_swap(*connection_data.connection_state, .ShouldReply, .Replying) {
                 reply := connection_data.reply;
                 mg_http_reply_CFormat(conn, reply.status, reply.header, "%s", reply.body);
 
                 set_connection_state(conn, .is_draining, true);
-                maybe_make_thread_available(server, connection_data);
             }
         }
     }
 
     process_write :: (conn: *mg_connection, listen_data: *void) {
+        connection_data := get_connection_data(conn);
 
+        if compare_and_swap(*connection_data.connection_state, .Replying, .Replied) {
+            // maybe_free_connection_data(connection_data);
+            // TODO I need a free not closed event for this one
+            // set_connection_state(conn, .is_closing, true);
+        }
     }
 
     process_close :: (conn: *mg_connection, listen_data: *void) {
         server := cast(*mg_threaded_server) listen_data;
 
-        connection_data := (cast(**mg_connection_data) conn.data.data).*;
-        if connection_data {
-            maybe_make_thread_available(server, connection_data);
+        connection_data := get_connection_data(conn);
+        set_connection_data(conn, null);
+
+        did_free := maybe_free_connection_data(connection_data);
+        if did_free {
+            free(connection_data);
         }
+        // while true {
+        //     should_
+        // }
+
+        // if compare_and_swap(*connection_data.connection_state, .
+
     }
 
     process_error :: (conn: *mg_connection, listen_data: *void) {
@@ -227,7 +238,7 @@ mg_threaded_server_free :: (server: *mg_threaded_server) {
     mg_endpoint_server_free(server.endpoint_server);
     array_free(server.threads);
     array_free(server.semaphores);
-    array_free(server.states);
+    array_free(server.thread_states);
     array_free(server.connections);
     array_free(server.threads_alive);
     free(server);

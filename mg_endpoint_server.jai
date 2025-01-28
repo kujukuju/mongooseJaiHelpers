@@ -85,7 +85,6 @@ mg_endpoint_server_listen :: (server: *mg_endpoint_server, port: u16, $process_m
             // MG_EV_READ
             // MG_EV_HTTP_MSG
             // MG_EV_WRITE
-            print("MG_EV: %\n", cast(MG_EV) ev);
 
             if cast(MG_EV) ev == .HTTP_MSG {
                 hm := cast(*mg_http_message) ev_data;
@@ -137,10 +136,15 @@ mg_endpoint_server_listen :: (server: *mg_endpoint_server, port: u16, $process_m
                 #if process_poll then process_poll(conn, server.listen_data);
 
                 reset_temporary_storage();
+            } else if cast(MG_EV) ev == .WRITE {
+                #if process_write then process_write(conn, server.listen_data);
+
+                reset_temporary_storage();
             } else if cast(MG_EV) ev == .CLOSE {
                 #if process_close then process_close(conn, server.listen_data);
 
                 reset_temporary_storage();
+            } else if cast(MG_EV) ev == .READ {
             } else if cast(MG_EV) ev == .ERROR {
                 #if process_error then process_error(conn, server.listen_data);
 
@@ -323,11 +327,6 @@ mg_http_static_start :: (path: *u8, port: u16, interval: s32 = 50) {
 }
 
 mg_get_wildcard :: (request: *mg_request, index: int = 0) -> string, bool {
-    print("method: %\n", to_string(request.hm.method));
-    print("uri: %\n", to_string(request.hm.uri));
-    print("query: %\n", to_string(request.hm.query));
-    print("proto: %\n", to_string(request.hm.proto));
-
     match: mg_str;
     if index == 0 {
         match = mg_http_var(request.hm.uri, to_mg_str("*1"));
