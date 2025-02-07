@@ -6,7 +6,7 @@ mg_endpoint_server :: struct {
     poll_thread: *Thread;
     poll_thread_alive: bool;
     alive: bool;
-    ctx: *Context;
+    ctx: *#Context;
     data: *void;
     listen_data: *void;
 }
@@ -722,7 +722,7 @@ mg_client_request :: struct {
     method: mg_method;
     response: *mg_client_response;
     timeout: int;
-    client_context: Context;
+    client_context: #Context;
     thread_id: u64;
 }
 
@@ -1016,7 +1016,7 @@ core_count :: #run get_number_of_processors();
 core_thread_count :: core_count * 2;
 mg_method_count :: cast(u16) mg_method.Fallback + 1;
 
-mg_context: Context;
+mg_context: #Context;
 
 array_add_bytes :: (array: *[..] u8, to_append: [] u8) {
     // returns the next power of 2 >= the current number
