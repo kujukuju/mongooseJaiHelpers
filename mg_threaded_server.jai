@@ -70,11 +70,16 @@ mg_threaded_server_create :: (data: *void = null) -> *mg_threaded_server {
 
             if !compare_and_swap(*connection_data.connection_state, .Opened, .ShouldReply) {
                 // if we couldn't set the state to should reply, that means we're closed not freed
+            // TODO I removed this because it was crashing but almost certainly that's not the right thing to do TODO TODO TODO TODO TODO TODO/
+            // TODO crash location was null pointer at should_close := compare_and_swap(*connection_data.connection_state, .Opened, .ClosedNotFreed);
                 did_free := maybe_free_connection_data(connection_data);
                 if did_free {
+                    print("freeing a %\n", index);
                     free(connection_data);
                 }
             }
+
+            print("setting % to null\n", index);
 
             server.connections[index] = null;
             server.thread_states[index] = .Available;
@@ -112,6 +117,7 @@ maybe_free_connection_data :: (connection_data: *mg_connection_data) -> did_free
             should_free = should_free || compare_and_swap(*connection_data.connection_state, .ClosedNotFreed, .ClosedAndFreed);
 
             if should_free {
+                print("freeing c\n");
                 mg_free(connection_data);
 
                 return true;
@@ -185,6 +191,8 @@ mg_threaded_server_listen :: (server: *mg_threaded_server, port: u16) {
             connection_data := get_connection_data(conn);
 
             if connection_data && compare_and_swap(*connection_data.connection_state, .ShouldReply, .Replying) {
+                print("replying and then draining\n");
+
                 reply := connection_data.reply;
                 mg_http_reply_CFormat(conn, reply.status, reply.header, "%s", reply.body);
 
@@ -196,29 +204,30 @@ mg_threaded_server_listen :: (server: *mg_threaded_server, port: u16) {
     process_write :: (conn: *mg_connection, listen_data: *void) {
         connection_data := get_connection_data(conn);
 
-        if compare_and_swap(*connection_data.connection_state, .Replying, .Replied) {
-            // maybe_free_connection_data(connection_data);
-            // TODO I need a free not closed event for this one
-            // set_connection_state(conn, .is_closing, true);
-        }
+        print("write\n");
+
+        // if connection_data && compare_and_swap(*connection_data.connection_state, .Replying, .Replied) {
+        //     // maybe_free_connection_data(connection_data);
+        //     // TODO I need a free not closed event for this one
+        //     // set_connection_state(conn, .is_closing, true);
+        // }
     }
 
     process_close :: (conn: *mg_connection, listen_data: *void) {
         server := cast(*mg_threaded_server) listen_data;
 
+        print("closed\n");
+
         connection_data := get_connection_data(conn);
         set_connection_data(conn, null);
 
-        did_free := maybe_free_connection_data(connection_data);
-        if did_free {
-            free(connection_data);
+        if connection_data {
+            did_free := maybe_free_connection_data(connection_data);
+            if did_free {
+                print("freeing b\n");
+                free(connection_data);
+            }
         }
-        // while true {
-        //     should_
-        // }
-
-        // if compare_and_swap(*connection_data.connection_state, .
-
     }
 
     process_error :: (conn: *mg_connection, listen_data: *void) {

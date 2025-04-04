@@ -76,10 +76,8 @@ mg_endpoint_server_listen :: (server: *mg_endpoint_server, port: u16) {
 mg_endpoint_server_listen :: (server: *mg_endpoint_server, port: u16, $process_message: mg_message_callback, $process_poll: mg_poll_callback, $process_write: mg_write_callback, $process_close: mg_close_callback, $process_error: mg_error_callback, listen_data: *void) {
     mg_callback :: (conn: *mg_connection, ev: s32, ev_data: *void) #c_call {
         // guessing at fn_data since the update
-        fn_data := conn.fn_data;
-        server := cast(*mg_endpoint_server) fn_data;
+        server := cast(*mg_endpoint_server) conn.fn_data;
         push_context server.ctx.* {
-
             // MG_EV_OPEN
             // MG_EV_ACCEPT
             // MG_EV_READ
@@ -153,7 +151,7 @@ mg_endpoint_server_listen :: (server: *mg_endpoint_server, port: u16, $process_m
         }
     }
 
-    url := sprint("http://localhost:%", port);
+    url := sprint("http://0.0.0.0:%", port);
     defer free(url);
     url_c := to_c_string(url);
     defer free(url_c);
@@ -312,7 +310,7 @@ mg_http_static_start :: (path: *u8, port: u16, interval: s32 = 50) {
         }
     }
 
-    url := sprint("http://localhost:%", port);
+    url := sprint("http://0.0.0.0:%", port);
     defer free(url);
     url_c := to_c_string(url);
     defer free(url_c);
@@ -516,7 +514,7 @@ mg_ws_server_create :: (port: u16) -> *mg_ws_server {
     array_reserve(*server.data_buffer_back, 1024 * 1024);
     init(*server.connections);
 
-    url := sprint("http://localhost:%", port);
+    url := sprint("http://0.0.0.0:%", port);
     defer free(url);
     url_c := to_c_string(url);
     defer free(url_c);
@@ -995,14 +993,14 @@ mg_set_closing :: (conn: *mg_connection, closing: bool) {
 }
 
 to_string :: (str: mg_str) -> string {
-    r: string = ---;
+    r: string;
     r.data = str.buf;
     r.count = cast(s64) str.len;
     return r;
 }
 
 to_mg_str :: (str: string) -> mg_str {
-    r: mg_str = ---;
+    r: mg_str;
     r.buf = str.data;
     r.len = cast(u64) str.count;
     return r;
