@@ -555,7 +555,7 @@ mg_ws_server_get_connections :: (server: *mg_ws_server) -> [] u32 {
 }
 
 mg_ws_server_send :: (server: *mg_ws_server, id: u32, bytes: [] u8) {
-    conn, found := table_find(*server.connections, id);
+    found, conn := table_find_new(*server.connections, id);
     if !found {
         return;
     }
